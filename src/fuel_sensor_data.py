@@ -212,8 +212,9 @@ class FuelSensorDataProcessor:
             "ts_utc": df["device_time"],
             "lat": df.get("lat"),
             "lng": df.get("lng"),
-            "fuel_level_l_raw": df["fuel_level_l_raw"],
-            "fuel_level_l": df["fuel_level_l"],
+            "sensor_raw_value": df.get("sensor_raw_value"),  # Original raw sensor value
+            "fuel_level_l_raw": df["fuel_level_l_raw"],      # After calibration
+            "fuel_level_l": df["fuel_level_l"],              # After smoothing
             "fuel_level_norm": df.get("fuel_level_norm"),
             "calibration_used": df["calibration_used"],
             "calibration_points": df.get("calibration_points", 0),

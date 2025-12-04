@@ -137,7 +137,8 @@ def init_session_state():
         "events_df": None,
         "events": [],
         "data_gaps": [],
-        "summary": None
+        "summary": None,
+        "sensor_processor": None  # For calibration visualization
     }
     
     for key, value in defaults.items():
@@ -548,6 +549,199 @@ def render_config_panel():
                     st.error(f"❌ Error: {e}")
 
 
+def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
+    """
+    Render calibration visualization showing raw sensor values → liters conversion.
+    Only shown if calibration was used.
+    """
+    from plotly.subplots import make_subplots
+    
+    # Check if calibration was used
+    if not fuel_df["calibration_used"].any():
+        st.info("ℹ️ No calibration data available for this sensor. Raw values are used directly as liters.")
+        return
+    
+    # Check if we have raw sensor values
+    if "sensor_raw_value" not in fuel_df.columns or fuel_df["sensor_raw_value"].isna().all():
+        st.warning("⚠️ Raw sensor values not available for visualization.")
+        return
+    
+    # Get calibration table from sensor
+    sensors = sensor_processor.sensors
+    if not sensors:
+        return
+    
+    sensor = sensors[0]
+    calibration_data = sensor.calibration_data
+    
+    if not calibration_data or len(calibration_data) < 2:
+        st.info("ℹ️ Calibration table not available or has insufficient points.")
+        return
+    
+    # Create visualization with 2 subplots
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.6, 0.4],
+        subplot_titles=(
+            "📊 Raw Sensor Value vs Calibrated Liters (Time Series)",
+            "📐 Calibration Curve"
+        ),
+        horizontal_spacing=0.1
+    )
+    
+    COLORS = {
+        "raw": "#f97316",      # Orange for raw
+        "calibrated": "#2563eb",  # Blue for calibrated
+        "curve": "#10b981",    # Green for calibration curve
+        "points": "#ef4444",   # Red for calibration points
+    }
+    
+    # Plot 1: Time series comparison
+    df_valid = fuel_df.dropna(subset=["sensor_raw_value", "fuel_level_l_raw"])
+    
+    # Raw sensor values (left Y axis)
+    fig.add_trace(
+        go.Scatter(
+            x=df_valid["ts_utc"],
+            y=df_valid["sensor_raw_value"],
+            mode="lines",
+            name="Raw Sensor Value",
+            line=dict(color=COLORS["raw"], width=2),
+            opacity=0.8,
+            yaxis="y1",
+            hovertemplate="<b>Raw:</b> %{y:.1f}<br><b>Time:</b> %{x}<extra></extra>"
+        ),
+        row=1, col=1
+    )
+    
+    # Calibrated liters (right Y axis)
+    fig.add_trace(
+        go.Scatter(
+            x=df_valid["ts_utc"],
+            y=df_valid["fuel_level_l_raw"],
+            mode="lines",
+            name="Calibrated (Liters)",
+            line=dict(color=COLORS["calibrated"], width=2),
+            opacity=0.8,
+            yaxis="y2",
+            hovertemplate="<b>Liters:</b> %{y:.1f} L<br><b>Time:</b> %{x}<extra></extra>"
+        ),
+        row=1, col=1
+    )
+    
+    # Plot 2: Calibration curve
+    cal_points = sorted(calibration_data, key=lambda x: x["in"])
+    cal_in = [p["in"] for p in cal_points]
+    cal_out = [p["out"] for p in cal_points]
+    
+    # Interpolated curve
+    import numpy as np
+    if len(cal_in) > 1:
+        x_interp = np.linspace(min(cal_in), max(cal_in), 100)
+        y_interp = np.interp(x_interp, cal_in, cal_out)
+        
+        fig.add_trace(
+            go.Scatter(
+                x=x_interp,
+                y=y_interp,
+                mode="lines",
+                name="Calibration Curve",
+                line=dict(color=COLORS["curve"], width=3),
+                hovertemplate="<b>Raw:</b> %{x:.1f}<br><b>Liters:</b> %{y:.1f} L<extra></extra>"
+            ),
+            row=1, col=2
+        )
+    
+    # Calibration points
+    fig.add_trace(
+        go.Scatter(
+            x=cal_in,
+            y=cal_out,
+            mode="markers",
+            name="Calibration Points",
+            marker=dict(color=COLORS["points"], size=10, symbol="circle"),
+            hovertemplate="<b>Raw:</b> %{x:.1f}<br><b>Liters:</b> %{y:.1f} L<extra></extra>"
+        ),
+        row=1, col=2
+    )
+    
+    # Add data range overlay on calibration curve
+    raw_min = df_valid["sensor_raw_value"].min()
+    raw_max = df_valid["sensor_raw_value"].max()
+    fig.add_vrect(
+        x0=raw_min, x1=raw_max,
+        fillcolor="rgba(37, 99, 235, 0.1)",
+        layer="below",
+        line_width=0,
+        row=1, col=2
+    )
+    fig.add_annotation(
+        x=(raw_min + raw_max) / 2,
+        y=max(cal_out) * 0.95,
+        text=f"Data range: {raw_min:.0f} - {raw_max:.0f}",
+        showarrow=False,
+        font=dict(size=10, color="#2563eb"),
+        bgcolor="rgba(255,255,255,0.8)",
+        row=1, col=2
+    )
+    
+    # Layout
+    fig.update_layout(
+        height=400,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor="rgba(255,255,255,0.9)"
+        ),
+        plot_bgcolor="#f8fafc",
+        paper_bgcolor="#ffffff",
+        margin=dict(l=60, r=60, t=80, b=40)
+    )
+    
+    # First subplot: dual Y-axis
+    fig.update_yaxes(
+        title_text="Raw Sensor Value",
+        titlefont=dict(color=COLORS["raw"]),
+        tickfont=dict(color=COLORS["raw"]),
+        gridcolor="#e2e8f0",
+        row=1, col=1
+    )
+    
+    # Add secondary Y-axis for first subplot
+    fig.update_layout(
+        yaxis2=dict(
+            title="Liters",
+            titlefont=dict(color=COLORS["calibrated"]),
+            tickfont=dict(color=COLORS["calibrated"]),
+            anchor="x",
+            overlaying="y",
+            side="right"
+        )
+    )
+    
+    # Second subplot axes
+    fig.update_xaxes(title_text="Raw Sensor Value", gridcolor="#e2e8f0", row=1, col=2)
+    fig.update_yaxes(title_text="Liters", gridcolor="#e2e8f0", row=1, col=2)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Show calibration stats
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Calibration Points", len(cal_points))
+    with col2:
+        st.metric("Raw Range", f"{min(cal_in):.0f} - {max(cal_in):.0f}")
+    with col3:
+        st.metric("Liters Range", f"{min(cal_out):.0f} - {max(cal_out):.0f} L")
+    with col4:
+        extrapolated_pct = (fuel_df.get("calibration_extrapolated", pd.Series([False])).sum() / len(fuel_df) * 100) if len(fuel_df) > 0 else 0
+        st.metric("Extrapolated", f"{extrapolated_pct:.1f}%")
+
+
 def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, show_speed: bool = False):
     """Render main visualization"""
     
@@ -817,6 +1011,7 @@ def main():
                     st.session_state.events = events_proc.events
                     st.session_state.data_gaps = sensor_proc.data_gaps
                     st.session_state.summary = summary
+                    st.session_state.sensor_processor = sensor_proc  # Store for calibration viz
                     
                     st.write(f"✅ Processed **{len(fuel_df)}** data points")
                     st.write(f"⚡ Detected **{len(events_df)}** events")
@@ -855,6 +1050,17 @@ def main():
             st.session_state.data_gaps,
             show_speed=show_speed
         )
+        
+        # Calibration visualization (only if calibration was used)
+        if st.session_state.processed_fuel_df["calibration_used"].any():
+            with st.expander("🔬 Calibration: Raw Sensor → Liters Conversion", expanded=False):
+                if hasattr(st.session_state, 'sensor_processor') and st.session_state.sensor_processor:
+                    render_calibration_visualization(
+                        st.session_state.processed_fuel_df,
+                        st.session_state.sensor_processor
+                    )
+                else:
+                    st.warning("⚠️ Sensor processor not available for calibration visualization.")
         
         st.markdown("### ⚡ Detected Events")
         render_events_table(st.session_state.events)

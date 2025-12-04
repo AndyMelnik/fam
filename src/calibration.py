@@ -208,6 +208,7 @@ def convert_to_liters(
     
     Returns:
         DataFrame with additional columns:
+            - sensor_raw_value: Original raw sensor value (before calibration)
             - fuel_level_l_raw: Calibrated value in liters
             - calibration_used: Whether calibration was applied
             - calibration_points: Number of calibration points used
@@ -224,6 +225,9 @@ def convert_to_liters(
         return apply_sensor_parameters(row["raw_numeric"], sensor_info)
     
     result_df["processed_value"] = result_df.apply(apply_params, axis=1)
+    
+    # Keep original raw sensor value for visualization
+    result_df["sensor_raw_value"] = result_df["processed_value"]
     
     # Initialize calibration table
     calibration = CalibrationTable(sensor_info.calibration_data)
@@ -248,7 +252,7 @@ def convert_to_liters(
         result_df["calibration_points"] = 0
         result_df["calibration_extrapolated"] = False
     
-    # Clean up intermediate columns
+    # Clean up intermediate columns (keep sensor_raw_value)
     result_df = result_df.drop(columns=["raw_numeric", "processed_value"])
     
     return result_df
