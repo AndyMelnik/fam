@@ -34,7 +34,9 @@
       "cluster": {
         "merge_window_min_min": 5,
         "merge_window_min_max": 30,
-        "min_points_in_cluster": 1
+        "min_points_in_cluster": 1,
+        "plateau_window_multiplier": 1.5,
+        "stability_threshold_l": 2.0
       },
       "event": {
         "min_volume_l": 10.0,

@@ -66,6 +66,11 @@ class ClusterConfig(BaseModel):
     merge_window_min_min: int = Field(default=5, ge=1, le=120)
     merge_window_min_max: int = Field(default=30, ge=5, le=240)
     min_points_in_cluster: int = Field(default=1, ge=1, le=100)
+    # Plateau detection parameters (for accurate volume calculation)
+    plateau_window_multiplier: float = Field(default=1.5, ge=1.0, le=5.0, 
+        description="Multiplier for merge_window to find plateau regions")
+    stability_threshold_l: float = Field(default=2.0, ge=0.1, le=10.0,
+        description="Max std dev (liters) for stable plateau detection")
 
 
 class EventConfig(BaseModel):

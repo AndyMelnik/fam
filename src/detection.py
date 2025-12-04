@@ -1,6 +1,6 @@
 """
 Event detection module
-Detects fuel refuel and drain events with clustering
+Detects fuel refuel and drain events with plateau-based volume calculation
 """
 
 import numpy as np
@@ -41,6 +41,9 @@ class FuelEventCluster:
     max_gap_sec: int
     candidate_points: List[CandidatePoint] = field(default_factory=list)
     confidence: float = 0.0  # 0-1 confidence score
+    # New fields for plateau-based calculation
+    start_level_l: float = 0.0  # Level at start plateau
+    end_level_l: float = 0.0    # Level at end plateau
 
 
 def calculate_thresholds(
@@ -51,20 +54,7 @@ def calculate_thresholds(
     min_step_pct_level: float,
     mode: str = "absolute_and_relative"
 ) -> float:
-    """
-    Calculate detection threshold based on configuration.
-    
-    Args:
-        current_level: Current fuel level in liters
-        tank_volume: Tank volume in liters (optional)
-        min_step_l: Absolute minimum step in liters
-        min_step_pct_tank: Minimum step as percentage of tank
-        min_step_pct_level: Minimum step as percentage of current level
-        mode: "absolute_only", "relative_only", "absolute_and_relative"
-    
-    Returns:
-        Threshold value in liters
-    """
+    """Calculate detection threshold based on configuration."""
     thresholds = []
     
     if mode in ["absolute_only", "absolute_and_relative"]:
@@ -83,6 +73,77 @@ def calculate_thresholds(
     return max(thresholds)
 
 
+def find_plateau_level(
+    values: np.ndarray,
+    timestamps: pd.Series,
+    center_idx: int,
+    direction: str,  # "backward" or "forward"
+    window_minutes: float = 10.0,
+    stability_threshold_l: float = 2.0,
+    min_points: int = 3
+) -> Tuple[int, float]:
+    """
+    Find stable plateau level before or after an event.
+    
+    Args:
+        values: Fuel level values array
+        timestamps: Timestamps series
+        center_idx: Starting index to search from
+        direction: "backward" to find pre-event plateau, "forward" for post-event
+        window_minutes: Time window to search for plateau
+        stability_threshold_l: Maximum variance for stable plateau
+        min_points: Minimum points to consider as plateau
+    
+    Returns:
+        Tuple of (plateau_idx, plateau_level)
+    """
+    n = len(values)
+    
+    if direction == "backward":
+        # Search backward for stable region before event
+        search_range = range(center_idx - 1, max(0, center_idx - 100), -1)
+    else:
+        # Search forward for stable region after event
+        search_range = range(center_idx + 1, min(n, center_idx + 100))
+    
+    best_idx = center_idx
+    best_level = values[center_idx] if not pd.isna(values[center_idx]) else 0
+    
+    # Sliding window to find most stable region
+    window_size = min_points
+    best_stability = float('inf')
+    
+    for i in search_range:
+        if pd.isna(values[i]):
+            continue
+        
+        # Check time constraint
+        time_diff = abs((timestamps.iloc[i] - timestamps.iloc[center_idx]).total_seconds()) / 60
+        if time_diff > window_minutes:
+            break
+        
+        # Calculate stability in window around this point
+        if direction == "backward":
+            window_start = max(0, i - window_size)
+            window_end = i + 1
+        else:
+            window_start = i
+            window_end = min(n, i + window_size + 1)
+        
+        window_values = values[window_start:window_end]
+        window_values = window_values[~pd.isna(window_values)]
+        
+        if len(window_values) >= min_points:
+            stability = np.std(window_values)
+            
+            if stability < stability_threshold_l and stability < best_stability:
+                best_stability = stability
+                best_idx = i
+                best_level = np.median(window_values)
+    
+    return best_idx, best_level
+
+
 def detect_candidate_points(
     df: pd.DataFrame,
     value_column: str = "fuel_level_l",
@@ -94,20 +155,7 @@ def detect_candidate_points(
 ) -> List[CandidatePoint]:
     """
     Detect candidate points for refuel/drain events.
-    
     Uses delta-based detection with configurable thresholds.
-    
-    Args:
-        df: DataFrame with fuel data
-        value_column: Column with smoothed fuel values
-        time_column: Column with timestamps
-        tank_volume: Tank volume for relative thresholds
-        refuel_config: Refuel detection thresholds
-        drain_config: Drain detection thresholds
-        mode: Threshold calculation mode
-    
-    Returns:
-        List of candidate points
     """
     refuel_config = refuel_config or {
         "min_step_l": 5.0,
@@ -183,15 +231,6 @@ def cluster_candidate_points(
 ) -> List[FuelEventCluster]:
     """
     Cluster nearby candidate points into events.
-    
-    Args:
-        candidates: List of candidate points
-        merge_window_min: Maximum time gap (minutes) to merge points
-        min_points_in_cluster: Minimum points to form valid cluster
-        allow_mixed_sign: Whether to allow mixed refuel/drain in same cluster
-    
-    Returns:
-        List of event clusters
     """
     if not candidates:
         return []
@@ -213,19 +252,15 @@ def cluster_candidate_points(
         should_merge = gap <= merge_window_min
         
         if not allow_mixed_sign:
-            # Check if same event type
             should_merge = should_merge and (current_point.event_type == current_cluster_points[0].event_type)
         
         if should_merge:
             current_cluster_points.append(current_point)
         else:
-            # Finalize current cluster
             if len(current_cluster_points) >= min_points_in_cluster:
                 cluster = _create_cluster(current_cluster_points, allow_mixed_sign)
                 if cluster:
                     clusters.append(cluster)
-            
-            # Start new cluster
             current_cluster_points = [current_point]
     
     # Handle last cluster
@@ -241,11 +276,11 @@ def _create_cluster(
     points: List[CandidatePoint],
     allow_mixed_sign: bool
 ) -> Optional[FuelEventCluster]:
-    """Create a cluster from candidate points"""
+    """Create a cluster from candidate points (preliminary, volume will be recalculated)"""
     if not points:
         return None
     
-    # Calculate signed volume (sum of deltas)
+    # Preliminary signed volume (sum of deltas)
     signed_volume = sum(p.delta_l for p in points)
     
     # Determine event type
@@ -271,13 +306,104 @@ def _create_cluster(
         start_lng=points[0].lng,
         end_lat=points[-1].lat,
         end_lng=points[-1].lng,
-        volume_change_l=abs(signed_volume),
-        signed_volume_l=signed_volume,
+        volume_change_l=abs(signed_volume),  # Will be recalculated
+        signed_volume_l=signed_volume,        # Will be recalculated
         samples_in_event=len(points),
         max_gap_sec=max_gap,
         candidate_points=points,
-        confidence=0.0  # Will be set by context validation
+        confidence=0.0
     )
+
+
+def refine_event_boundaries_and_volume(
+    clusters: List[FuelEventCluster],
+    df: pd.DataFrame,
+    value_column: str = "fuel_level_l",
+    time_column: str = "device_time",
+    plateau_window_min: float = 10.0,
+    stability_threshold_l: float = 2.0
+) -> List[FuelEventCluster]:
+    """
+    Refine event boundaries by finding plateaus and recalculate volume.
+    
+    This function extends events to find stable plateau levels before and after,
+    then calculates volume as the difference between these plateaus.
+    
+    Args:
+        clusters: List of preliminary clusters
+        df: DataFrame with fuel data
+        value_column: Column with fuel values
+        time_column: Column with timestamps
+        plateau_window_min: Time window (minutes) to search for plateau
+        stability_threshold_l: Maximum std dev for stable plateau
+    
+    Returns:
+        List of clusters with refined boundaries and volumes
+    """
+    values = df[value_column].values
+    timestamps = pd.to_datetime(df[time_column])
+    
+    refined_clusters = []
+    
+    for cluster in clusters:
+        # Find plateau BEFORE the event (stable level before fuel change started)
+        first_candidate_idx = cluster.candidate_points[0].idx
+        start_plateau_idx, start_level = find_plateau_level(
+            values, timestamps,
+            center_idx=first_candidate_idx,
+            direction="backward",
+            window_minutes=plateau_window_min,
+            stability_threshold_l=stability_threshold_l
+        )
+        
+        # Find plateau AFTER the event (stable level after fuel change ended)
+        last_candidate_idx = cluster.candidate_points[-1].idx
+        end_plateau_idx, end_level = find_plateau_level(
+            values, timestamps,
+            center_idx=last_candidate_idx,
+            direction="forward",
+            window_minutes=plateau_window_min,
+            stability_threshold_l=stability_threshold_l
+        )
+        
+        # Calculate actual volume change from plateau to plateau
+        volume_change = end_level - start_level
+        
+        # Update cluster with refined data
+        cluster.start_idx = start_plateau_idx
+        cluster.end_idx = end_plateau_idx
+        cluster.start_datetime = timestamps.iloc[start_plateau_idx]
+        cluster.end_datetime = timestamps.iloc[end_plateau_idx]
+        cluster.start_level_l = start_level
+        cluster.end_level_l = end_level
+        
+        # Update volume (plateau-based)
+        cluster.signed_volume_l = volume_change
+        cluster.volume_change_l = abs(volume_change)
+        
+        # Verify event type matches volume direction
+        if volume_change > 0:
+            cluster.event_type = "refuel"
+        elif volume_change < 0:
+            cluster.event_type = "drain"
+        
+        # Update location from refined boundaries
+        lat_col = "lat" if "lat" in df.columns else None
+        lng_col = "lng" if "lng" in df.columns else None
+        
+        if lat_col:
+            cluster.start_lat = df.iloc[start_plateau_idx][lat_col] if not pd.isna(df.iloc[start_plateau_idx][lat_col]) else cluster.start_lat
+            cluster.end_lat = df.iloc[end_plateau_idx][lat_col] if not pd.isna(df.iloc[end_plateau_idx][lat_col]) else cluster.end_lat
+        if lng_col:
+            cluster.start_lng = df.iloc[start_plateau_idx][lng_col] if not pd.isna(df.iloc[start_plateau_idx][lng_col]) else cluster.start_lng
+            cluster.end_lng = df.iloc[end_plateau_idx][lng_col] if not pd.isna(df.iloc[end_plateau_idx][lng_col]) else cluster.end_lng
+        
+        # Count samples in refined window
+        cluster.samples_in_event = end_plateau_idx - start_plateau_idx + 1
+        
+        refined_clusters.append(cluster)
+    
+    return refined_clusters
 
 
 def validate_events_with_context(
@@ -290,22 +416,6 @@ def validate_events_with_context(
 ) -> List[FuelEventCluster]:
     """
     Validate events using contextual information.
-    
-    Checks:
-    - Vehicle was stopped during event
-    - Valid GPS quality
-    - Ignition state
-    
-    Args:
-        clusters: List of event clusters
-        df: Original DataFrame with context columns
-        context_config: Context validation configuration
-        time_column: Timestamp column
-        speed_column: Speed column
-        ignition_column: Ignition column
-    
-    Returns:
-        Validated clusters with confidence scores
     """
     context_config = context_config or {
         "max_valid_speed_kmh": 5.0,
@@ -334,24 +444,23 @@ def validate_events_with_context(
             avg_speed = event_data[speed_column].mean()
             if pd.notna(avg_speed):
                 if avg_speed <= context_config["max_valid_speed_kmh"]:
-                    confidence *= 1.0  # Good - vehicle stopped
+                    confidence *= 1.0
                 elif avg_speed <= context_config["max_valid_speed_kmh"] * 2:
-                    confidence *= 0.7  # Suspicious - slow movement
+                    confidence *= 0.7
                 else:
-                    confidence *= 0.3  # Unlikely - vehicle moving
+                    confidence *= 0.3
         
-        # Check ignition (for refuels, typically ignition is off)
+        # Check ignition
         if context_config["use_ignition"] and ignition_column in df.columns:
             ign_values = event_data[ignition_column].fillna(True)
             if cluster.event_type == "refuel":
-                # Refuels typically happen with ignition off
                 pct_off = (ign_values == False).mean()
                 confidence *= (0.7 + 0.3 * pct_off)
         
         # Event duration check
         duration_min = (cluster.end_datetime - cluster.start_datetime).total_seconds() / 60
         if duration_min < context_config["min_stop_duration_min"]:
-            confidence *= 0.8  # Very quick event
+            confidence *= 0.8
         
         cluster.confidence = min(max(confidence, 0.0), 1.0)
         validated.append(cluster)
@@ -365,22 +474,10 @@ def filter_events_by_volume(
     min_volume_l: float = 10.0,
     min_volume_pct_tank: float = 2.0
 ) -> List[FuelEventCluster]:
-    """
-    Filter events by minimum volume threshold.
-    
-    Args:
-        clusters: List of event clusters
-        tank_volume: Tank volume for percentage calculation
-        min_volume_l: Minimum absolute volume in liters
-        min_volume_pct_tank: Minimum volume as percentage of tank
-    
-    Returns:
-        Filtered list of clusters
-    """
+    """Filter events by minimum volume threshold."""
     filtered = []
     
     for cluster in clusters:
-        # Calculate threshold
         threshold = min_volume_l
         
         if tank_volume and tank_volume > 0:
@@ -404,10 +501,11 @@ def detect_fuel_events(
     Main function to detect fuel events.
     
     Pipeline:
-    1. Detect candidate points
-    2. Cluster candidates
-    3. Validate with context
-    4. Filter by minimum volume
+    1. Detect candidate points (significant deltas)
+    2. Cluster candidates into events
+    3. Refine boundaries and recalculate volume (plateau-based)
+    4. Validate with context
+    5. Filter by minimum volume
     
     Args:
         df: DataFrame with smoothed fuel data
@@ -439,10 +537,8 @@ def detect_fuel_events(
     # Step 2: Cluster candidates
     cluster_cfg = detection_cfg.get("cluster", {})
     
-    # Calculate adaptive merge window
-    smoothing_level = config.get("smoothing", {}).get("smoothing_level", 0.5)
-    merge_window_min = cluster_cfg.get("merge_window_min_min", 5) + \
-                       (cluster_cfg.get("merge_window_min_max", 30) - cluster_cfg.get("merge_window_min_min", 5)) * smoothing_level
+    # Merge window based on config
+    merge_window_min = cluster_cfg.get("merge_window_min_max", 30)
     
     clusters = cluster_candidate_points(
         candidates=candidates,
@@ -451,7 +547,25 @@ def detect_fuel_events(
         allow_mixed_sign=detection_cfg.get("event", {}).get("allow_mixed_sign_cluster", False)
     )
     
-    # Step 3: Validate with context
+    if not clusters:
+        return []
+    
+    # Step 3: Refine boundaries and recalculate volume (plateau-based)
+    # Use configurable window to find stable plateaus
+    plateau_multiplier = cluster_cfg.get("plateau_window_multiplier", 1.5)
+    stability_threshold = cluster_cfg.get("stability_threshold_l", 2.0)
+    plateau_window = cluster_cfg.get("merge_window_min_max", 30) * plateau_multiplier
+    
+    clusters = refine_event_boundaries_and_volume(
+        clusters=clusters,
+        df=df,
+        value_column=value_column,
+        time_column=time_column,
+        plateau_window_min=plateau_window,
+        stability_threshold_l=stability_threshold
+    )
+    
+    # Step 4: Validate with context
     clusters = validate_events_with_context(
         clusters=clusters,
         df=df,
@@ -459,7 +573,7 @@ def detect_fuel_events(
         time_column=time_column
     )
     
-    # Step 4: Filter by volume
+    # Step 5: Filter by volume
     event_cfg = detection_cfg.get("event", {})
     clusters = filter_events_by_volume(
         clusters=clusters,
@@ -479,9 +593,7 @@ def events_to_dataframe(
     processing_version: str,
     processing_params: dict
 ) -> pd.DataFrame:
-    """
-    Convert events to DataFrame matching silver_data_layer.fuel_events schema.
-    """
+    """Convert events to DataFrame matching silver_data_layer.fuel_events schema."""
     if not events:
         return pd.DataFrame()
     
@@ -498,6 +610,8 @@ def events_to_dataframe(
             "start_lng": event.start_lng,
             "end_lat": event.end_lat,
             "end_lng": event.end_lng,
+            "start_level_l": event.start_level_l,
+            "end_level_l": event.end_level_l,
             "volume_change_l": event.volume_change_l,
             "signed_volume_l": event.signed_volume_l,
             "samples_in_event": event.samples_in_event,
@@ -508,5 +622,3 @@ def events_to_dataframe(
         })
     
     return pd.DataFrame(records)
-
-

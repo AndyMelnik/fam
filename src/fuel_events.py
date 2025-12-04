@@ -77,6 +77,12 @@ class FuelEventsProcessor:
         """
         Detect fuel events from processed data.
         
+        Uses plateau-based volume calculation:
+        1. Detects candidate points (significant fuel changes)
+        2. Clusters nearby candidates
+        3. Extends boundaries to find stable plateau levels
+        4. Calculates volume as difference between plateaus
+        
         Returns:
             List of detected events (refuels and drains)
         """
@@ -87,11 +93,10 @@ class FuelEventsProcessor:
         if self.object_info and self.object_info.fuel_tank_volume:
             tank_volume = self.object_info.fuel_tank_volume
         
-        # Build config dict for detection
+        # Build config dict for detection (includes plateau parameters)
         config_dict = {
             "detection": self.config.parameters.detection.model_dump(),
-            "context": self.config.parameters.context.model_dump(),
-            "smoothing": {"smoothing_level": 5}  # Default for merge window calculation
+            "context": self.config.parameters.context.model_dump()
         }
         
         self.events = detect_fuel_events(

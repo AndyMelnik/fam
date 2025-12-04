@@ -435,6 +435,23 @@ def render_config_panel():
                 "Min % of Tank for Event", value=events_config.parameters.detection.event.min_volume_pct_tank,
                 min_value=0.1, max_value=100.0, step=0.5
             )
+        
+        st.markdown("**Plateau Detection** *(for accurate volume calculation)*")
+        col5, col6 = st.columns(2)
+        with col5:
+            events_config.parameters.detection.cluster.plateau_window_multiplier = st.number_input(
+                "Plateau Window Multiplier",
+                value=float(events_config.parameters.detection.cluster.plateau_window_multiplier),
+                min_value=1.0, max_value=5.0, step=0.1,
+                help="Multiplier for merge_window to search for stable plateaus"
+            )
+        with col6:
+            events_config.parameters.detection.cluster.stability_threshold_l = st.number_input(
+                "Stability Threshold (L)",
+                value=float(events_config.parameters.detection.cluster.stability_threshold_l),
+                min_value=0.1, max_value=10.0, step=0.1,
+                help="Max std dev (L) for considering a region as stable plateau"
+            )
     
     # JSON editors
     with tabs[2]:
@@ -601,6 +618,8 @@ def render_events_table(events: list):
             "Type": "🟢 Refuel" if event.event_type == "refuel" else "🔴 Drain",
             "Start": event.start_datetime.strftime("%Y-%m-%d %H:%M"),
             "End": event.end_datetime.strftime("%Y-%m-%d %H:%M"),
+            "Start Level (L)": f"{event.start_level_l:.1f}",
+            "End Level (L)": f"{event.end_level_l:.1f}",
             "Volume (L)": f"{event.volume_change_l:.1f}",
             "Signed (L)": f"{event.signed_volume_l:+.1f}",
             "Samples": event.samples_in_event,
@@ -609,6 +628,9 @@ def render_events_table(events: list):
         })
     
     st.dataframe(pd.DataFrame(events_data), use_container_width=True, hide_index=True)
+    
+    # Show volume calculation explanation
+    st.caption("💡 Volume is calculated as the difference between stable plateau levels (end_level - start_level)")
 
 
 def render_silver_layer_tables(fuel_df: pd.DataFrame, events_df: pd.DataFrame):
