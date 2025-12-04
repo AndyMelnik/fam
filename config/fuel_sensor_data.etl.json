@@ -1,0 +1,96 @@
+{
+  "version": "1.0.0",
+  "metadata": {
+    "name": "Fuel Sensor Data Silver Layer",
+    "description": "ETL configuration for building silver layer fuel_sensor_data (liters, smoothed time series)",
+    "model_name": "hampel_median_ema_delta_cluster_v1",
+    "model_version": "1.1.0",
+    "created_at": "2025-01-27T00:00:00Z",
+    "created_by": "data_platform",
+    "tags": ["fuel", "sensor_data", "silver_layer", "prod"],
+    "owner_team": "data_platform",
+    "change_log": [
+      {
+        "version": "1.0.0",
+        "date": "2025-01-27",
+        "comment": "Initial configuration for fuel_sensor_data"
+      }
+    ]
+  },
+  "parameters": {
+    "processing_window_hours": 48,
+    "smoothing": {
+      "smoothing_level": 5,
+      "hampel": {
+        "window_min_sec": 60,
+        "window_max_sec": 900,
+        "sigma_min": 2.0,
+        "sigma_max": 4.0
+      },
+      "median": {
+        "window_min_points": 3,
+        "window_max_points": 15
+      },
+      "ema": {
+        "alpha_min": 0.05,
+        "alpha_max": 0.5
+      }
+    },
+    "zero_handling": {
+      "mode": "auto",
+      "startup_grace_period_min": 5,
+      "min_zero_run_min": 10,
+      "max_zero_level_l": 2.0
+    },
+    "context": {
+      "max_valid_speed_kmh": 999.0,
+      "max_hdop": 20.0,
+      "use_ignition": false,
+      "min_stop_duration_min": 0
+    }
+  },
+  "sql_template": {
+    "engine": "postgres",
+    "use_transaction": true,
+    "timeout_sec": 1200,
+    "read_only_sources": true,
+    "query": " ",
+    "parameters": {
+      "window_start": ":window_start",
+      "window_end": ":window_end",
+      "processing_version": "fuel_core_v1.1.0"
+    }
+  },
+  "target": {
+    "schema": "silver_data_layer",
+    "table": "fuel_sensor_data",
+    "primary_keys": ["device_id", "ts_utc", "processing_version"],
+    "partitioning": {
+      "type": "time",
+      "column": "ts_utc",
+      "granularity": "day"
+    },
+    "indexes": [
+      ["device_id", "ts_utc"],
+      ["vehicle_id", "ts_utc"]
+    ],
+    "retention_policy_days": 365,
+    "write_mode": "upsert",
+    "idempotent": true
+  },
+  "scheduler": {
+    "cron_expression": "0 * * * *",
+    "enabled": true,
+    "max_runtime_sec": 1500,
+    "max_concurrent_runs": 1,
+    "backfill_allowed": false,
+    "catchup_from": null
+  },
+  "security": {
+    "allowed_roles": ["airflow", "data_platform"],
+    "source_schemas": ["raw_telematics_data", "raw_business_data"],
+    "target_schema": "silver_data_layer",
+    "require_tls": true,
+    "no_secrets_in_config": true
+  }
+}
