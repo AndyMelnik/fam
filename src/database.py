@@ -109,6 +109,50 @@ class DatabaseConnector:
             for _, row in df.iterrows()
         ]
 
+    def get_objects_with_sensors_details(self) -> pd.DataFrame:
+        """
+        Get detailed table of objects with their fuel sensor configurations.
+        Returns DataFrame with: object_id, object_label, device_id, sensor_label, 
+        input_label, sensor_type, calibration_data
+        """
+        query = """
+        SELECT 
+            o.object_id,
+            o.object_label,
+            o.device_id,
+            sd.sensor_label,
+            sd.input_label,
+            sd.sensor_type,
+            sd.calibration_data
+        FROM raw_business_data.objects o
+        INNER JOIN raw_business_data.sensor_description sd
+            ON sd.device_id = o.device_id
+            AND LOWER(sd.sensor_type) = 'fuel'
+        ORDER BY o.object_label, sd.sensor_label
+        """
+        
+        with self.engine.connect() as conn:
+            df = pd.read_sql(text(query), conn)
+        
+        # Format calibration_data for display
+        def format_calibration(cal_data):
+            if cal_data is None:
+                return "N/A"
+            if isinstance(cal_data, str):
+                try:
+                    cal_data = json.loads(cal_data)
+                except:
+                    return str(cal_data)[:50] + "..."
+            if isinstance(cal_data, list):
+                if len(cal_data) == 0:
+                    return "Empty"
+                return f"{len(cal_data)} points"
+            return str(cal_data)[:50] + "..."
+        
+        df["calibration_data"] = df["calibration_data"].apply(format_calibration)
+        
+        return df
+
     def get_fuel_sensors_for_device(self, device_id: int) -> List[SensorInfo]:
         """
         Get fuel sensors configuration for a specific device.

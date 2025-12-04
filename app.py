@@ -129,6 +129,7 @@ def init_session_state():
         "db_connected": False,
         "db_connector": None,
         "objects_list": [],
+        "objects_details_df": None,
         "selected_object": None,
         "sensor_config": sensor_config,
         "events_config": events_config,
@@ -248,11 +249,13 @@ def render_connection_sidebar():
                     st.write("Loading objects with fuel sensors...")
                     
                     objects = db.get_objects_with_fuel_sensors()
+                    objects_details_df = db.get_objects_with_sensors_details()
                     
                     if objects:
                         st.session_state.db_connector = db
                         st.session_state.db_connected = True
                         st.session_state.objects_list = objects
+                        st.session_state.objects_details_df = objects_details_df
                         status.update(label=f"✅ Connected! Found {len(objects)} objects", state="complete")
                     else:
                         st.warning("⚠️ No objects with fuel sensors found")
@@ -318,6 +321,31 @@ def render_config_info():
             <span class="config-badge">⚡ {events_config.target.table}</span>
         </div>
         """, unsafe_allow_html=True)
+
+
+def render_objects_table():
+    """Render table with objects and their fuel sensor configurations"""
+    if st.session_state.objects_details_df is None or st.session_state.objects_details_df.empty:
+        st.info("No objects with fuel sensors found")
+        return
+    
+    df = st.session_state.objects_details_df.copy()
+    
+    # Rename columns for display
+    df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Calibration Data"]
+    
+    st.markdown("### 📋 Objects with Fuel Sensors")
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Object ID": st.column_config.NumberColumn("Object ID", width="small"),
+            "Device ID": st.column_config.NumberColumn("Device ID", width="small"),
+            "Calibration Data": st.column_config.TextColumn("Calibration", width="medium"),
+        }
+    )
+    st.caption(f"Total: {len(df)} sensor configurations across {df['Object ID'].nunique()} objects")
 
 
 def render_config_panel():
@@ -732,6 +760,12 @@ def main():
         return
     
     render_config_info()
+    
+    # Objects table with sensor configurations
+    with st.expander("📋 Objects with Fuel Sensors", expanded=True):
+        render_objects_table()
+    
+    st.markdown("---")
     
     # Process button
     if st.button("🚀 Process Data", type="primary", use_container_width=True):
