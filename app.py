@@ -346,8 +346,11 @@ def render_objects_table():
     
     df = st.session_state.objects_details_df.copy()
     
-    # Rename columns for display
-    df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Calibration Data"]
+    # Rename columns for display (8 columns including has_data)
+    if "has_data" in df.columns or len(df.columns) == 8:
+        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Calibration", "Has Data"]
+    else:
+        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Calibration"]
     
     st.markdown("### 📋 Objects with Fuel Sensors")
     st.dataframe(
@@ -357,7 +360,8 @@ def render_objects_table():
         column_config={
             "Object ID": st.column_config.NumberColumn("Object ID", width="small"),
             "Device ID": st.column_config.NumberColumn("Device ID", width="small"),
-            "Calibration Data": st.column_config.TextColumn("Calibration", width="medium"),
+            "Calibration": st.column_config.TextColumn("Calibration", width="medium"),
+            "Has Data": st.column_config.TextColumn("Has Data (7d)", width="small"),
         }
     )
     st.caption(f"Total: {len(df)} sensor configurations across {df['Object ID'].nunique()} objects")
