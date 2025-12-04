@@ -16,7 +16,7 @@ import json
 
 from .config import FuelSensorDataETLConfig, load_fuel_sensor_data_config
 from .database import DatabaseConnector, ObjectInfo, SensorInfo, find_data_gaps
-from .calibration import convert_to_liters, normalize_fuel_level
+from .calibration import convert_to_calibrated, normalize_fuel_level
 from .zero_handling import handle_zeros_v2
 from .smoothing import apply_smoothing_to_dataframe, SmoothingStats
 
@@ -27,7 +27,7 @@ class FuelSensorDataProcessor:
     
     Pipeline:
     1. Extract raw data from Bronze layer
-    2. Convert to liters using calibration table
+    2. Convert to calibrated units using calibration table
     3. Handle zero values (sticky zeros, grace period)
     4. Apply smoothing (Hampel → Median → EMA)
     5. Normalize to tank capacity
@@ -58,6 +58,10 @@ class FuelSensorDataProcessor:
         self.object_info: Optional[ObjectInfo] = None
         self.smoothing_stats: Optional[SmoothingStats] = None
         self.data_gaps: List[Tuple[datetime, datetime]] = []
+        
+        # Measurement units (set during processing)
+        self.measurement_units: str = "L"  # Default to liters
+        self.measurement_units_description: str = "Liters"
     
     def load_data_from_db(
         self,
@@ -137,8 +141,8 @@ class FuelSensorDataProcessor:
         # Use first fuel sensor
         sensor = self.sensors[0]
         
-        # Step 1: Convert to liters using calibration
-        df = convert_to_liters(
+        # Step 1: Convert using calibration table (values outside range are clipped)
+        df, self.measurement_units, self.measurement_units_description = convert_to_calibrated(
             self.raw_data,
             sensor,
             value_column="value"
@@ -250,14 +254,25 @@ class FuelSensorDataProcessor:
         
         df = self.processed_data
         
+        # Calculate clipping stats
+        clipped_low_count = int(df.get("calibration_clipped_low", pd.Series([False])).sum())
+        clipped_high_count = int(df.get("calibration_clipped_high", pd.Series([False])).sum())
+        total_valid = int(df["fuel_level_l"].notna().sum())
+        
         return {
             "total_points": len(df),
-            "valid_points": int(df["fuel_level_l"].notna().sum()),
+            "valid_points": total_valid,
             "calibration_used": bool(df["calibration_used"].any()),
             "calibration_points": int(df["calibration_points"].max()) if "calibration_points" in df else 0,
-            "min_fuel_l": float(df["fuel_level_l"].min()) if df["fuel_level_l"].notna().any() else 0,
-            "max_fuel_l": float(df["fuel_level_l"].max()) if df["fuel_level_l"].notna().any() else 0,
-            "avg_fuel_l": float(df["fuel_level_l"].mean()) if df["fuel_level_l"].notna().any() else 0,
+            "measurement_units": self.measurement_units,
+            "measurement_units_description": self.measurement_units_description,
+            "min_fuel": float(df["fuel_level_l"].min()) if df["fuel_level_l"].notna().any() else 0,
+            "max_fuel": float(df["fuel_level_l"].max()) if df["fuel_level_l"].notna().any() else 0,
+            "avg_fuel": float(df["fuel_level_l"].mean()) if df["fuel_level_l"].notna().any() else 0,
+            "calibration_clipped_low": clipped_low_count,
+            "calibration_clipped_high": clipped_high_count,
+            "calibration_clipped_total": clipped_low_count + clipped_high_count,
+            "calibration_clipped_pct": round((clipped_low_count + clipped_high_count) / total_valid * 100, 1) if total_valid > 0 else 0,
             "data_gaps_count": len(self.data_gaps),
             "smoothing_stats": {
                 "outliers_removed": self.smoothing_stats.outliers_removed if self.smoothing_stats else 0,

@@ -1,6 +1,7 @@
 """
 Calibration and unit conversion module
-Converts raw sensor values to liters using calibration tables
+Converts raw sensor values to calibrated output using calibration tables.
+Supports different measurement units (liters, gallons, percent, etc.)
 """
 
 import numpy as np
@@ -11,31 +12,90 @@ from dataclasses import dataclass
 from .database import SensorInfo
 
 
+# Known measurement unit types
+VOLUME_UNITS = ["l", "liters", "litre", "litres", "liter", "л", "литры", "литр"]
+GALLON_UNITS = ["gal", "gallon", "gallons", "галлон", "галлоны"]
+PERCENT_UNITS = ["%", "percent", "pct", "процент", "проценты"]
+
+
+def normalize_units(sensor_units: Optional[str]) -> str:
+    """
+    Normalize sensor units to a standard display format.
+    
+    Args:
+        sensor_units: Raw sensor units from database
+        
+    Returns:
+        Normalized unit string for display
+    """
+    if sensor_units is None:
+        return "L"  # Default to liters
+    
+    units_lower = sensor_units.lower().strip()
+    
+    if units_lower in VOLUME_UNITS:
+        return "L"
+    elif units_lower in GALLON_UNITS:
+        return "gal"
+    elif units_lower in PERCENT_UNITS:
+        return "%"
+    else:
+        # Return as-is if unknown
+        return sensor_units
+
+
+def get_unit_description(sensor_units: Optional[str]) -> str:
+    """
+    Get a human-readable description of the measurement units.
+    """
+    if sensor_units is None:
+        return "Liters (default)"
+    
+    units_lower = sensor_units.lower().strip()
+    
+    if units_lower in VOLUME_UNITS:
+        return "Liters"
+    elif units_lower in GALLON_UNITS:
+        return "Gallons"
+    elif units_lower in PERCENT_UNITS:
+        return "Percent of tank"
+    else:
+        return sensor_units
+
+
 @dataclass
 class CalibrationResult:
     """Result of calibration conversion"""
-    value_liters: float
+    value: float  # Calibrated value in sensor units
     calibration_used: bool
     calibration_points: int
-    interpolation_type: str  # "exact", "interpolated", "extrapolated", "fallback"
+    interpolation_type: str  # "exact", "interpolated", "clipped_low", "clipped_high", "fallback"
+    units: str = "L"  # Measurement units
 
 
 class CalibrationTable:
     """
-    Calibration table for converting raw sensor values to liters.
-    Uses linear interpolation/extrapolation.
+    Calibration table for converting raw sensor values to calibrated output.
+    Uses linear interpolation within range, clips values outside range.
     """
     
-    def __init__(self, calibration_data: Optional[List[Dict[str, float]]] = None):
+    def __init__(
+        self, 
+        calibration_data: Optional[List[Dict[str, float]]] = None,
+        sensor_units: Optional[str] = None
+    ):
         """
         Initialize calibration table.
         
         Args:
-            calibration_data: List of {"in": raw_value, "out": liters} dictionaries
+            calibration_data: List of {"in": raw_value, "out": calibrated_value} dictionaries
+            sensor_units: Measurement units from sensor description
         """
         self.points: List[Tuple[float, float]] = []
         self._in_values: np.ndarray = np.array([])
         self._out_values: np.ndarray = np.array([])
+        self.units = normalize_units(sensor_units)
+        self.units_description = get_unit_description(sensor_units)
         
         if calibration_data:
             self._load_calibration_data(calibration_data)
@@ -72,7 +132,8 @@ class CalibrationTable:
     
     def convert(self, raw_value: float) -> CalibrationResult:
         """
-        Convert raw sensor value to liters using calibration table.
+        Convert raw sensor value using calibration table.
+        Values outside calibration range are clipped to boundary values.
         
         Args:
             raw_value: Raw sensor reading
@@ -82,77 +143,88 @@ class CalibrationTable:
         """
         if not self.is_valid:
             return CalibrationResult(
-                value_liters=raw_value,
+                value=raw_value,
                 calibration_used=False,
                 calibration_points=0,
-                interpolation_type="fallback"
+                interpolation_type="fallback",
+                units=self.units
             )
+        
+        min_in, max_in = self.range
         
         # Check for exact match
         exact_idx = np.where(np.isclose(self._in_values, raw_value, rtol=1e-6))[0]
         if len(exact_idx) > 0:
             return CalibrationResult(
-                value_liters=float(self._out_values[exact_idx[0]]),
+                value=float(self._out_values[exact_idx[0]]),
                 calibration_used=True,
                 calibration_points=self.num_points,
-                interpolation_type="exact"
+                interpolation_type="exact",
+                units=self.units
             )
         
-        # Determine interpolation type
-        min_in, max_in = self.range
-        if raw_value < min_in or raw_value > max_in:
-            interp_type = "extrapolated"
-        else:
-            interp_type = "interpolated"
+        # Handle values outside calibration range - CLIP instead of extrapolate
+        if raw_value < min_in:
+            # Clip to minimum calibration value
+            return CalibrationResult(
+                value=float(self._out_values[0]),  # Use the minimum output value
+                calibration_used=True,
+                calibration_points=self.num_points,
+                interpolation_type="clipped_low",
+                units=self.units
+            )
+        elif raw_value > max_in:
+            # Clip to maximum calibration value
+            return CalibrationResult(
+                value=float(self._out_values[-1]),  # Use the maximum output value
+                calibration_used=True,
+                calibration_points=self.num_points,
+                interpolation_type="clipped_high",
+                units=self.units
+            )
         
-        # Linear interpolation/extrapolation
+        # Linear interpolation within range
         result = np.interp(raw_value, self._in_values, self._out_values)
         
-        # For extrapolation beyond range, use linear extension
-        if raw_value < min_in and len(self._in_values) >= 2:
-            # Extrapolate using first two points
-            slope = (self._out_values[1] - self._out_values[0]) / (self._in_values[1] - self._in_values[0])
-            result = self._out_values[0] + slope * (raw_value - self._in_values[0])
-        elif raw_value > max_in and len(self._in_values) >= 2:
-            # Extrapolate using last two points
-            slope = (self._out_values[-1] - self._out_values[-2]) / (self._in_values[-1] - self._in_values[-2])
-            result = self._out_values[-1] + slope * (raw_value - self._in_values[-1])
-        
         return CalibrationResult(
-            value_liters=float(result),
+            value=float(result),
             calibration_used=True,
             calibration_points=self.num_points,
-            interpolation_type=interp_type
+            interpolation_type="interpolated",
+            units=self.units
         )
     
-    def convert_array(self, raw_values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def convert_array(self, raw_values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Convert array of raw values to liters.
+        Convert array of raw values using calibration table.
+        Values outside calibration range are CLIPPED to boundary values.
         
         Returns:
-            Tuple of (liters_array, is_extrapolated_mask)
+            Tuple of (calibrated_array, clipped_low_mask, clipped_high_mask)
         """
         if not self.is_valid:
-            return raw_values.copy(), np.ones(len(raw_values), dtype=bool)
+            # Return raw values as-is, mark all as not clipped
+            return raw_values.copy(), np.zeros(len(raw_values), dtype=bool), np.zeros(len(raw_values), dtype=bool)
         
-        liters = np.interp(raw_values, self._in_values, self._out_values)
-        
-        # Handle extrapolation
+        # Clip raw values to calibration range BEFORE interpolation
         min_in, max_in = self.range
-        below_mask = raw_values < min_in
-        above_mask = raw_values > max_in
+        clipped_low = raw_values < min_in
+        clipped_high = raw_values > max_in
         
-        if np.any(below_mask) and len(self._in_values) >= 2:
-            slope = (self._out_values[1] - self._out_values[0]) / (self._in_values[1] - self._in_values[0])
-            liters[below_mask] = self._out_values[0] + slope * (raw_values[below_mask] - self._in_values[0])
+        # Clip raw values to calibration boundaries
+        clipped_raw = np.clip(raw_values, min_in, max_in)
         
-        if np.any(above_mask) and len(self._in_values) >= 2:
-            slope = (self._out_values[-1] - self._out_values[-2]) / (self._in_values[-1] - self._in_values[-2])
-            liters[above_mask] = self._out_values[-1] + slope * (raw_values[above_mask] - self._in_values[-1])
+        # Now interpolate - all values are within range
+        calibrated = np.interp(clipped_raw, self._in_values, self._out_values)
         
-        extrapolated = below_mask | above_mask
-        
-        return liters, extrapolated
+        return calibrated, clipped_low, clipped_high
+    
+    @property
+    def output_range(self) -> Tuple[float, float]:
+        """Get output range (min_out, max_out) from calibration table"""
+        if not self.is_valid:
+            return (0.0, 0.0)
+        return (float(self._out_values.min()), float(self._out_values.max()))
 
 
 def apply_sensor_parameters(
@@ -193,13 +265,14 @@ def apply_sensor_parameters(
     return result
 
 
-def convert_to_liters(
+def convert_to_calibrated(
     df: pd.DataFrame,
     sensor_info: SensorInfo,
     value_column: str = "value"
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, str, str]:
     """
-    Convert raw sensor data to liters using calibration table.
+    Convert raw sensor data using calibration table.
+    Values outside calibration range are CLIPPED to boundary values.
     
     Args:
         df: DataFrame with raw sensor values
@@ -207,11 +280,13 @@ def convert_to_liters(
         value_column: Name of column with raw values
     
     Returns:
-        DataFrame with additional columns:
+        Tuple of (DataFrame, units_short, units_description) where DataFrame has columns:
             - sensor_raw_value: Original raw sensor value (before calibration)
-            - fuel_level_l_raw: Calibrated value in liters
+            - fuel_level_l_raw: Calibrated value in measurement units
             - calibration_used: Whether calibration was applied
             - calibration_points: Number of calibration points used
+            - calibration_clipped_low: Value was below calibration range (clipped)
+            - calibration_clipped_high: Value was above calibration range (clipped)
     """
     result_df = df.copy()
     
@@ -229,32 +304,62 @@ def convert_to_liters(
     # Keep original raw sensor value for visualization
     result_df["sensor_raw_value"] = result_df["processed_value"]
     
-    # Initialize calibration table
-    calibration = CalibrationTable(sensor_info.calibration_data)
+    # Initialize calibration table with units
+    calibration = CalibrationTable(
+        sensor_info.calibration_data,
+        sensor_info.sensor_units
+    )
+    
+    # Get units info
+    units_short = calibration.units
+    units_description = calibration.units_description
     
     if calibration.is_valid:
-        # Apply calibration
+        # Apply calibration with clipping
         valid_mask = ~result_df["processed_value"].isna()
         valid_values = result_df.loc[valid_mask, "processed_value"].values
         
-        liters, extrapolated = calibration.convert_array(valid_values)
+        calibrated, clipped_low, clipped_high = calibration.convert_array(valid_values)
         
         result_df["fuel_level_l_raw"] = np.nan
-        result_df.loc[valid_mask, "fuel_level_l_raw"] = liters
+        result_df.loc[valid_mask, "fuel_level_l_raw"] = calibrated
         result_df["calibration_used"] = valid_mask & True
         result_df["calibration_points"] = calibration.num_points
-        result_df["calibration_extrapolated"] = False
-        result_df.loc[valid_mask, "calibration_extrapolated"] = extrapolated
+        result_df["calibration_clipped_low"] = False
+        result_df["calibration_clipped_high"] = False
+        result_df.loc[valid_mask, "calibration_clipped_low"] = clipped_low
+        result_df.loc[valid_mask, "calibration_clipped_high"] = clipped_high
+        # Keep backward compatibility column
+        result_df["calibration_extrapolated"] = result_df["calibration_clipped_low"] | result_df["calibration_clipped_high"]
     else:
-        # Fallback: use processed value as-is
+        # Fallback: use processed value as-is (no calibration)
         result_df["fuel_level_l_raw"] = result_df["processed_value"]
         result_df["calibration_used"] = False
         result_df["calibration_points"] = 0
+        result_df["calibration_clipped_low"] = False
+        result_df["calibration_clipped_high"] = False
         result_df["calibration_extrapolated"] = False
     
     # Clean up intermediate columns (keep sensor_raw_value)
     result_df = result_df.drop(columns=["raw_numeric", "processed_value"])
     
+    return result_df, units_short, units_description
+
+
+# Backward compatibility alias
+def convert_to_liters(
+    df: pd.DataFrame,
+    sensor_info: SensorInfo,
+    value_column: str = "value"
+) -> pd.DataFrame:
+    """
+    Backward compatible function - converts raw sensor data using calibration.
+    Values outside calibration range are CLIPPED.
+    
+    Returns:
+        DataFrame with calibrated values
+    """
+    result_df, _, _ = convert_to_calibrated(df, sensor_info, value_column)
     return result_df
 
 

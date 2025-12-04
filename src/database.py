@@ -113,7 +113,7 @@ class DatabaseConnector:
         """
         Get detailed table of objects with their fuel sensor configurations.
         Returns DataFrame with: object_id, object_label, device_id, sensor_label, 
-        input_label, sensor_type, calibration_data, has_data (if check_data_availability=True)
+        input_label, sensor_type, sensor_units, calibration_data, has_data (if check_data_availability=True)
         
         Args:
             check_data_availability: If True, checks if sensor has data in inputs table (last 7 days)
@@ -126,6 +126,7 @@ class DatabaseConnector:
             sd.sensor_label,
             sd.input_label,
             sd.sensor_type,
+            COALESCE(sd.sensor_units, 'L') as sensor_units,
             sd.calibration_data
         FROM raw_business_data.objects o
         INNER JOIN raw_business_data.sensor_description sd

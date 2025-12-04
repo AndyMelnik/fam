@@ -347,9 +347,16 @@ def render_objects_table():
     
     df = st.session_state.objects_details_df.copy()
     
-    # Rename columns for display (8 columns including has_data)
-    if "has_data" in df.columns or len(df.columns) == 8:
-        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Calibration", "Has Data"]
+    # Rename columns for display (9 columns: object_id, object_label, device_id, sensor_label, input_label, sensor_type, sensor_units, calibration_data, has_data)
+    num_cols = len(df.columns)
+    if num_cols == 9:
+        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Calibration", "Has Data"]
+    elif num_cols == 8:
+        # Could be with or without has_data
+        if "has_data" in df.columns:
+            df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Has Data"]
+        else:
+            df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Calibration"]
     else:
         df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Calibration"]
     
@@ -361,6 +368,7 @@ def render_objects_table():
         column_config={
             "Object ID": st.column_config.NumberColumn("Object ID", width="small"),
             "Device ID": st.column_config.NumberColumn("Device ID", width="small"),
+            "Units": st.column_config.TextColumn("Units", width="small"),
             "Calibration": st.column_config.TextColumn("Calibration", width="medium"),
             "Has Data": st.column_config.TextColumn("Has Data (7d)", width="small"),
         }
@@ -551,14 +559,23 @@ def render_config_panel():
 
 def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     """
-    Render calibration visualization showing raw sensor values → liters conversion.
+    Render calibration visualization showing raw sensor values → calibrated output.
+    Shows measurement units and clipping statistics.
     Only shown if calibration was used.
     """
     from plotly.subplots import make_subplots
     
+    # Get measurement units from processor
+    units = getattr(sensor_processor, 'measurement_units', 'L')
+    units_desc = getattr(sensor_processor, 'measurement_units_description', 'Liters')
+    
     # Check if calibration was used
     if not fuel_df["calibration_used"].any():
-        st.info("ℹ️ No calibration data available for this sensor. Raw values are used directly as liters.")
+        # Get sensor units directly if no calibration
+        sensors = sensor_processor.sensors if sensor_processor else []
+        sensor_units = sensors[0].sensor_units if sensors else None
+        units_msg = f" Values are displayed in **{units_desc}** ({units})." if units else ""
+        st.info(f"ℹ️ No calibration data available for this sensor. Raw values are used directly.{units_msg}")
         return
     
     # Check if we have raw sensor values
@@ -578,13 +595,16 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
         st.info("ℹ️ Calibration table not available or has insufficient points.")
         return
     
+    # Display measurement units info
+    st.markdown(f"**Measurement Units:** {units_desc} ({units})")
+    
     # Create visualization with 2 subplots
     fig = make_subplots(
         rows=1, cols=2,
         column_widths=[0.6, 0.4],
         subplot_titles=(
-            "📊 Raw Sensor Value vs Calibrated Liters (Time Series)",
-            "📐 Calibration Curve"
+            f"📊 Raw Sensor Value vs Calibrated Output ({units})",
+            f"📐 Calibration Curve"
         ),
         horizontal_spacing=0.1
     )
@@ -594,6 +614,7 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
         "calibrated": "#2563eb",  # Blue for calibrated
         "curve": "#10b981",    # Green for calibration curve
         "points": "#ef4444",   # Red for calibration points
+        "clipped": "#dc2626",  # Red for clipped regions
     }
     
     # Plot 1: Time series comparison
@@ -614,17 +635,17 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
         row=1, col=1
     )
     
-    # Calibrated liters (right Y axis)
+    # Calibrated output (right Y axis)
     fig.add_trace(
         go.Scatter(
             x=df_valid["ts_utc"],
             y=df_valid["fuel_level_l_raw"],
             mode="lines",
-            name="Calibrated (Liters)",
+            name=f"Calibrated ({units})",
             line=dict(color=COLORS["calibrated"], width=2),
             opacity=0.8,
             yaxis="y2",
-            hovertemplate="<b>Liters:</b> %{y:.1f} L<br><b>Time:</b> %{x}<extra></extra>"
+            hovertemplate=f"<b>{units}:</b> %{{y:.1f}}<br><b>Time:</b> %{{x}}<extra></extra>"
         ),
         row=1, col=1
     )
@@ -634,10 +655,16 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     cal_in = [p["in"] for p in cal_points]
     cal_out = [p["out"] for p in cal_points]
     
+    # Calibration range boundaries
+    cal_min_in = min(cal_in)
+    cal_max_in = max(cal_in)
+    cal_min_out = min(cal_out)
+    cal_max_out = max(cal_out)
+    
     # Interpolated curve
     import numpy as np
     if len(cal_in) > 1:
-        x_interp = np.linspace(min(cal_in), max(cal_in), 100)
+        x_interp = np.linspace(cal_min_in, cal_max_in, 100)
         y_interp = np.interp(x_interp, cal_in, cal_out)
         
         fig.add_trace(
@@ -647,7 +674,7 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
                 mode="lines",
                 name="Calibration Curve",
                 line=dict(color=COLORS["curve"], width=3),
-                hovertemplate="<b>Raw:</b> %{x:.1f}<br><b>Liters:</b> %{y:.1f} L<extra></extra>"
+                hovertemplate=f"<b>Raw:</b> %{{x:.1f}}<br><b>{units}:</b> %{{y:.1f}}<extra></extra>"
             ),
             row=1, col=2
         )
@@ -660,7 +687,7 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
             mode="markers",
             name="Calibration Points",
             marker=dict(color=COLORS["points"], size=10, symbol="circle"),
-            hovertemplate="<b>Raw:</b> %{x:.1f}<br><b>Liters:</b> %{y:.1f} L<extra></extra>"
+            hovertemplate=f"<b>Raw:</b> %{{x:.1f}}<br><b>{units}:</b> %{{y:.1f}}<extra></extra>"
         ),
         row=1, col=2
     )
@@ -668,16 +695,25 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     # Add data range overlay on calibration curve
     raw_min = df_valid["sensor_raw_value"].min()
     raw_max = df_valid["sensor_raw_value"].max()
+    
+    # Highlight valid data range
     fig.add_vrect(
-        x0=raw_min, x1=raw_max,
+        x0=max(raw_min, cal_min_in), x1=min(raw_max, cal_max_in),
         fillcolor="rgba(37, 99, 235, 0.1)",
         layer="below",
         line_width=0,
         row=1, col=2
     )
+    
+    # Add calibration range boundaries as vertical lines
+    fig.add_vline(x=cal_min_in, line_dash="dash", line_color=COLORS["clipped"], 
+                  annotation_text=f"Min: {cal_min_in:.0f}", annotation_position="top left", row=1, col=2)
+    fig.add_vline(x=cal_max_in, line_dash="dash", line_color=COLORS["clipped"], 
+                  annotation_text=f"Max: {cal_max_in:.0f}", annotation_position="top right", row=1, col=2)
+    
     fig.add_annotation(
-        x=(raw_min + raw_max) / 2,
-        y=max(cal_out) * 0.95,
+        x=(max(raw_min, cal_min_in) + min(raw_max, cal_max_in)) / 2,
+        y=cal_max_out * 0.95,
         text=f"Data range: {raw_min:.0f} - {raw_max:.0f}",
         showarrow=False,
         font=dict(size=10, color="#2563eb"),
@@ -713,7 +749,7 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     # Add secondary Y-axis for first subplot
     fig.update_layout(
         yaxis2=dict(
-            title=dict(text="Liters", font=dict(color=COLORS["calibrated"])),
+            title=dict(text=units, font=dict(color=COLORS["calibrated"])),
             tickfont=dict(color=COLORS["calibrated"]),
             anchor="x",
             overlaying="y",
@@ -723,25 +759,37 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     
     # Second subplot axes
     fig.update_xaxes(title_text="Raw Sensor Value", gridcolor="#e2e8f0", row=1, col=2)
-    fig.update_yaxes(title_text="Liters", gridcolor="#e2e8f0", row=1, col=2)
+    fig.update_yaxes(title_text=units, gridcolor="#e2e8f0", row=1, col=2)
     
     st.plotly_chart(fig, use_container_width=True)
     
+    # Calculate clipping statistics
+    clipped_low = fuel_df.get("calibration_clipped_low", pd.Series([False])).sum()
+    clipped_high = fuel_df.get("calibration_clipped_high", pd.Series([False])).sum()
+    total_clipped = clipped_low + clipped_high
+    clipped_pct = (total_clipped / len(fuel_df) * 100) if len(fuel_df) > 0 else 0
+    
     # Show calibration stats
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Calibration Points", len(cal_points))
     with col2:
-        st.metric("Raw Range", f"{min(cal_in):.0f} - {max(cal_in):.0f}")
+        st.metric("Calibration Range (Raw)", f"{cal_min_in:.0f} - {cal_max_in:.0f}")
     with col3:
-        st.metric("Liters Range", f"{min(cal_out):.0f} - {max(cal_out):.0f} L")
+        st.metric(f"Output Range ({units})", f"{cal_min_out:.0f} - {cal_max_out:.0f}")
     with col4:
-        extrapolated_pct = (fuel_df.get("calibration_extrapolated", pd.Series([False])).sum() / len(fuel_df) * 100) if len(fuel_df) > 0 else 0
-        st.metric("Extrapolated", f"{extrapolated_pct:.1f}%")
+        st.metric("Clipped (Total)", f"{total_clipped} ({clipped_pct:.1f}%)")
+    with col5:
+        st.metric("Clipped Low / High", f"{int(clipped_low)} / {int(clipped_high)}")
+    
+    # Show warning if significant clipping
+    if clipped_pct > 5:
+        st.warning(f"⚠️ **{clipped_pct:.1f}%** of values were outside the calibration range and were clipped to boundary values. "
+                   f"Consider extending the calibration table to cover the full sensor range ({raw_min:.0f} - {raw_max:.0f}).")
 
 
-def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, show_speed: bool = False):
-    """Render main visualization"""
+def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, show_speed: bool = False, measurement_units: str = "L"):
+    """Render main visualization with measurement units"""
     
     COLORS = {
         "raw_line": "#93c5fd",
@@ -756,11 +804,13 @@ def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, s
         "grid": "#e2e8f0",
     }
     
+    units = measurement_units  # Use provided units
+    
     if show_speed:
         fig = make_subplots(rows=2, cols=1, row_heights=[0.75, 0.25], shared_xaxes=True,
-                          vertical_spacing=0.08, subplot_titles=("📊 Fuel Level (Liters)", "🚗 Speed (km/h)"))
+                          vertical_spacing=0.08, subplot_titles=(f"📊 Fuel Level ({units})", "🚗 Speed (km/h)"))
     else:
-        fig = make_subplots(rows=1, cols=1, subplot_titles=("📊 Fuel Level (Liters)",))
+        fig = make_subplots(rows=1, cols=1, subplot_titles=(f"📊 Fuel Level ({units})",))
     
     # Data gaps
     for gap_start, gap_end in data_gaps:
@@ -784,21 +834,21 @@ def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, s
         
         y_max = fuel_df["fuel_level_l"].max() if fuel_df["fuel_level_l"].notna().any() else 100
         fig.add_annotation(x=event.start_datetime + (event.end_datetime - event.start_datetime) / 2,
-                          y=y_max * 0.95, text=f"{symbol} {event.volume_change_l:.1f}L", showarrow=True,
+                          y=y_max * 0.95, text=f"{symbol} {event.volume_change_l:.1f} {units}", showarrow=True,
                           arrowhead=2, arrowsize=1, arrowwidth=2, arrowcolor=border_color,
                           font=dict(color="#ffffff", size=12), bgcolor=border_color, bordercolor=border_color,
                           borderwidth=1, borderpad=5, row=1, col=1)
     
     # Data lines
     if "fuel_level_l_raw" in fuel_df.columns and fuel_df["fuel_level_l_raw"].notna().any():
-        fig.add_trace(go.Scatter(x=fuel_df["ts_utc"], y=fuel_df["fuel_level_l_raw"], mode="lines", name="Raw Data",
+        fig.add_trace(go.Scatter(x=fuel_df["ts_utc"], y=fuel_df["fuel_level_l_raw"], mode="lines", name="Raw (Calibrated)",
                                 line=dict(color=COLORS["raw_line"], width=2), opacity=0.7,
-                                hovertemplate="<b>Raw:</b> %{y:.1f} L<br><b>Time:</b> %{x}<extra></extra>"), row=1, col=1)
+                                hovertemplate=f"<b>Calibrated:</b> %{{y:.1f}} {units}<br><b>Time:</b> %{{x}}<extra></extra>"), row=1, col=1)
     
     if fuel_df["fuel_level_l"].notna().any():
         fig.add_trace(go.Scatter(x=fuel_df["ts_utc"], y=fuel_df["fuel_level_l"], mode="lines", name="Smoothed",
                                 line=dict(color=COLORS["smoothed_line"], width=3),
-                                hovertemplate="<b>Smoothed:</b> %{y:.1f} L<br><b>Time:</b> %{x}<extra></extra>"), row=1, col=1)
+                                hovertemplate=f"<b>Smoothed:</b> %{{y:.1f}} {units}<br><b>Time:</b> %{{x}}<extra></extra>"), row=1, col=1)
     
     if show_speed and "speed_kmh" in fuel_df.columns and fuel_df["speed_kmh"].notna().any():
         fig.add_trace(go.Scatter(x=fuel_df["ts_utc"], y=fuel_df["speed_kmh"].fillna(0), mode="lines", name="Speed",
@@ -814,7 +864,7 @@ def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, s
     
     fig.update_xaxes(gridcolor=COLORS["grid"], linecolor="#cbd5e1", tickfont=dict(color="#475569"), showgrid=True)
     fig.update_yaxes(gridcolor=COLORS["grid"], linecolor="#cbd5e1", tickfont=dict(color="#475569"),
-                    title_text="Liters", showgrid=True, row=1, col=1)
+                    title_text=units, showgrid=True, row=1, col=1)
     if show_speed:
         fig.update_yaxes(gridcolor=COLORS["grid"], title_text="km/h", showgrid=True, row=2, col=1)
     
@@ -844,11 +894,13 @@ def render_visualization(fuel_df: pd.DataFrame, events: list, data_gaps: list, s
     """, unsafe_allow_html=True)
 
 
-def render_events_table(events: list):
-    """Render events table"""
+def render_events_table(events: list, measurement_units: str = "L"):
+    """Render events table with measurement units"""
     if not events:
         st.info("No events detected")
         return
+    
+    units = measurement_units
     
     events_data = []
     for i, event in enumerate(events):
@@ -857,10 +909,10 @@ def render_events_table(events: list):
             "Type": "🟢 Refuel" if event.event_type == "refuel" else "🔴 Drain",
             "Start": event.start_datetime.strftime("%Y-%m-%d %H:%M"),
             "End": event.end_datetime.strftime("%Y-%m-%d %H:%M"),
-            "Start Level (L)": f"{event.start_level_l:.1f}",
-            "End Level (L)": f"{event.end_level_l:.1f}",
-            "Volume (L)": f"{event.volume_change_l:.1f}",
-            "Signed (L)": f"{event.signed_volume_l:+.1f}",
+            f"Start ({units})": f"{event.start_level_l:.1f}",
+            f"End ({units})": f"{event.end_level_l:.1f}",
+            f"Volume ({units})": f"{event.volume_change_l:.1f}",
+            f"Signed ({units})": f"{event.signed_volume_l:+.1f}",
             "Samples": event.samples_in_event,
             "Confidence": f"{event.confidence:.0%}",
             "Location": f"({event.start_lat:.4f}, {event.start_lng:.4f})" if event.start_lat else "N/A"
@@ -902,10 +954,11 @@ def render_silver_layer_tables(fuel_df: pd.DataFrame, events_df: pd.DataFrame):
             st.info("No events detected")
 
 
-def render_metrics(summary: dict):
-    """Render processing metrics"""
+def render_metrics(summary: dict, measurement_units: str = "L"):
+    """Render processing metrics with measurement units"""
     sensor_data = summary.get("sensor_data", {})
     events_data = summary.get("events", {})
+    units = measurement_units
     
     col1, col2, col3, col4, col5 = st.columns(5)
     
@@ -936,7 +989,7 @@ def render_metrics(summary: dict):
     with col4:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-value">{events_data.get('total_refuel_volume', 0):.0f}L</div>
+            <div class="metric-value">{events_data.get('total_refuel_volume', 0):.0f} {units}</div>
             <div class="metric-label">Total Refueled</div>
         </div>
         """, unsafe_allow_html=True)
@@ -1032,13 +1085,18 @@ def main():
     
     # Results
     if st.session_state.processed_fuel_df is not None:
+        # Get measurement units from sensor processor
+        sensor_proc = st.session_state.get('sensor_processor')
+        measurement_units = getattr(sensor_proc, 'measurement_units', 'L') if sensor_proc else 'L'
+        measurement_units_desc = getattr(sensor_proc, 'measurement_units_description', 'Liters') if sensor_proc else 'Liters'
+        
         st.markdown("---")
-        render_metrics(st.session_state.summary)
+        render_metrics(st.session_state.summary, measurement_units=measurement_units)
         
         st.markdown("---")
         col_title, col_option = st.columns([3, 1])
         with col_title:
-            st.markdown("### 📈 Fuel Level Visualization")
+            st.markdown(f"### 📈 Fuel Level Visualization ({measurement_units_desc})")
         with col_option:
             show_speed = st.checkbox("🚗 Show Speed", value=False)
         
@@ -1046,12 +1104,13 @@ def main():
             st.session_state.processed_fuel_df,
             st.session_state.events,
             st.session_state.data_gaps,
-            show_speed=show_speed
+            show_speed=show_speed,
+            measurement_units=measurement_units
         )
         
         # Calibration visualization (only if calibration was used)
         if st.session_state.processed_fuel_df["calibration_used"].any():
-            with st.expander("🔬 Calibration: Raw Sensor → Liters Conversion", expanded=False):
+            with st.expander("🔬 Calibration: Raw Sensor → Calibrated Output", expanded=False):
                 if hasattr(st.session_state, 'sensor_processor') and st.session_state.sensor_processor:
                     render_calibration_visualization(
                         st.session_state.processed_fuel_df,
@@ -1061,7 +1120,7 @@ def main():
                     st.warning("⚠️ Sensor processor not available for calibration visualization.")
         
         st.markdown("### ⚡ Detected Events")
-        render_events_table(st.session_state.events)
+        render_events_table(st.session_state.events, measurement_units=measurement_units)
         
         st.markdown("---")
         st.markdown("### 💾 Silver Layer Output")
