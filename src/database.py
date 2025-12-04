@@ -75,7 +75,7 @@ class DatabaseConnector:
     def get_objects_with_fuel_sensors(self) -> List[ObjectInfo]:
         """
         Get list of objects that have fuel sensors configured.
-        Returns objects with their associated vehicles and tank volumes.
+        Returns only objects with sensor_type = 'fuel'.
         """
         query = """
         SELECT DISTINCT
@@ -88,12 +88,9 @@ class DatabaseConnector:
         FROM raw_business_data.objects o
         LEFT JOIN raw_business_data.vehicles v 
             ON v.object_id = o.object_id
-        WHERE EXISTS (
-            SELECT 1 
-            FROM raw_business_data.sensor_description sd
-            WHERE sd.device_id = o.device_id
-            AND sd.sensor_type = 'fuel'
-        )
+        INNER JOIN raw_business_data.sensor_description sd
+            ON sd.device_id = o.device_id
+            AND LOWER(sd.sensor_type) = 'fuel'
         ORDER BY o.object_label
         """
         
