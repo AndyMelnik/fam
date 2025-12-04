@@ -109,11 +109,14 @@ class DatabaseConnector:
             for _, row in df.iterrows()
         ]
 
-    def get_objects_with_sensors_details(self) -> pd.DataFrame:
+    def get_objects_with_sensors_details(self, check_data_availability: bool = True) -> pd.DataFrame:
         """
         Get detailed table of objects with their fuel sensor configurations.
         Returns DataFrame with: object_id, object_label, device_id, sensor_label, 
-        input_label, sensor_type, calibration_data
+        input_label, sensor_type, calibration_data, has_data (if check_data_availability=True)
+        
+        Args:
+            check_data_availability: If True, checks if sensor has data in inputs table (last 7 days)
         """
         query = """
         SELECT 
@@ -150,6 +153,40 @@ class DatabaseConnector:
             return str(cal_data)[:50] + "..."
         
         df["calibration_data"] = df["calibration_data"].apply(format_calibration)
+        
+        # Check data availability in inputs table
+        if check_data_availability and not df.empty:
+            # Check last 7 days
+            check_query = """
+            SELECT DISTINCT device_id, sensor_name 
+            FROM raw_telematics_data.inputs
+            WHERE device_time >= NOW() - INTERVAL '7 days'
+            """
+            with self.engine.connect() as conn:
+                available_df = pd.read_sql(text(check_query), conn)
+            
+            # Create a set of (device_id, sensor_name) tuples
+            available_set = set(
+                zip(available_df["device_id"].astype(str), available_df["sensor_name"].str.lower())
+            )
+            
+            def check_has_data(row):
+                device_str = str(row["device_id"])
+                input_label_lower = row["input_label"].lower()
+                
+                # Check exact match
+                if (device_str, input_label_lower) in available_set:
+                    return "✅ Yes"
+                
+                # Check partial match
+                for (dev, sensor) in available_set:
+                    if dev == device_str:
+                        if input_label_lower in sensor or sensor in input_label_lower:
+                            return f"⚠️ ~{sensor}"
+                
+                return "❌ No"
+            
+            df["has_data"] = df.apply(check_has_data, axis=1)
         
         return df
 
@@ -368,6 +405,39 @@ class DatabaseConnector:
         
         return df
 
+    def find_matching_sensor_name(
+        self,
+        device_id: int,
+        input_label: str,
+        start_time: datetime,
+        end_time: datetime
+    ) -> Optional[str]:
+        """
+        Try to find actual sensor_name in inputs table that matches input_label.
+        Handles case differences and common naming variations.
+        """
+        # Get available sensors
+        available = self.get_available_sensor_names(device_id, start_time, end_time)
+        if not available:
+            return None
+        
+        # Try exact match first
+        if input_label in available:
+            return input_label
+        
+        # Try case-insensitive match
+        input_lower = input_label.lower()
+        for name in available:
+            if name.lower() == input_lower:
+                return name
+        
+        # Try partial match (sensor name contains input_label or vice versa)
+        for name in available:
+            if input_lower in name.lower() or name.lower() in input_lower:
+                return name
+        
+        return None
+
     def get_complete_fuel_data(
         self,
         object_info: ObjectInfo,
@@ -386,7 +456,26 @@ class DatabaseConnector:
         if not sensors:
             return pd.DataFrame(), []
         
-        sensor_names = [s.input_label for s in sensors]
+        # Try to find matching sensor names in inputs table
+        sensor_names = []
+        sensor_name_mapping = {}  # Maps actual_name -> original sensor
+        
+        for sensor in sensors:
+            # First try the input_label directly
+            actual_name = self.find_matching_sensor_name(
+                object_info.device_id,
+                sensor.input_label,
+                start_time,
+                end_time
+            )
+            
+            if actual_name:
+                sensor_names.append(actual_name)
+                sensor_name_mapping[actual_name] = sensor
+            else:
+                # Still add original name for error reporting
+                sensor_names.append(sensor.input_label)
+                sensor_name_mapping[sensor.input_label] = sensor
         
         # Get fuel data
         fuel_df = self.get_fuel_sensor_data(

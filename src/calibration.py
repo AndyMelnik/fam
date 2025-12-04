@@ -274,3 +274,4 @@ def normalize_fuel_level(
     return min(max(fuel_level_l / tank_volume, 0.0), 1.0)
 
 
+
