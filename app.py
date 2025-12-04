@@ -184,11 +184,26 @@ def run_processing_pipeline(
             )
         else:
             sensor_names = [s.input_label for s in sensors]
-            raise ValueError(
-                f"No fuel data found for device {object_info.device_id} "
-                f"in period {start_time} to {end_time}. "
-                f"Sensors: {sensor_names}."
+            # Get available sensor names for diagnostics
+            available_sensors = db_connector.get_available_sensor_names(
+                object_info.device_id, start_time, end_time
             )
+            
+            error_msg = (
+                f"No fuel data found for device {object_info.device_id} "
+                f"in period {start_time} to {end_time}.\n\n"
+                f"**Expected sensors (from sensor_description):** {sensor_names}\n\n"
+            )
+            
+            if available_sensors:
+                error_msg += f"**Available sensors (in inputs table):** {available_sensors[:20]}"
+                if len(available_sensors) > 20:
+                    error_msg += f" ... and {len(available_sensors) - 20} more"
+                error_msg += "\n\n⚠️ Check if input_label matches sensor_name in inputs table!"
+            else:
+                error_msg += "**No sensor data at all found in inputs table for this device and period.**"
+            
+            raise ValueError(error_msg)
     
     # Process: Calibration → Zero Handling → Smoothing
     fuel_data, smoothing_stats = sensor_processor.process()

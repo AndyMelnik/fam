@@ -204,6 +204,38 @@ class DatabaseConnector:
         
         return sensors
 
+    def get_available_sensor_names(
+        self,
+        device_id: int,
+        start_time: datetime,
+        end_time: datetime
+    ) -> List[str]:
+        """
+        Get list of available sensor names for a device in the given time range.
+        Useful for debugging when expected sensors are not found.
+        """
+        query = """
+        SELECT DISTINCT i.sensor_name
+        FROM raw_telematics_data.inputs i
+        WHERE i.device_id = :device_id
+        AND i.device_time >= :start_time
+        AND i.device_time < :end_time
+        ORDER BY i.sensor_name
+        """
+        
+        with self.engine.connect() as conn:
+            df = pd.read_sql(
+                text(query),
+                conn,
+                params={
+                    "device_id": device_id,
+                    "start_time": start_time,
+                    "end_time": end_time
+                }
+            )
+        
+        return df["sensor_name"].tolist() if not df.empty else []
+
     def get_fuel_sensor_data(
         self,
         device_id: int,
