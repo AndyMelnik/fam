@@ -704,8 +704,7 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     
     # First subplot: dual Y-axis
     fig.update_yaxes(
-        title_text="Raw Sensor Value",
-        titlefont=dict(color=COLORS["raw"]),
+        title=dict(text="Raw Sensor Value", font=dict(color=COLORS["raw"])),
         tickfont=dict(color=COLORS["raw"]),
         gridcolor="#e2e8f0",
         row=1, col=1
@@ -714,8 +713,7 @@ def render_calibration_visualization(fuel_df: pd.DataFrame, sensor_processor):
     # Add secondary Y-axis for first subplot
     fig.update_layout(
         yaxis2=dict(
-            title="Liters",
-            titlefont=dict(color=COLORS["calibrated"]),
+            title=dict(text="Liters", font=dict(color=COLORS["calibrated"])),
             tickfont=dict(color=COLORS["calibrated"]),
             anchor="x",
             overlaying="y",
