@@ -490,6 +490,85 @@ def filter_events_by_volume(
     return filtered
 
 
+def merge_overlapping_events(
+    clusters: List[FuelEventCluster],
+    overlap_threshold_min: float = 5.0
+) -> List[FuelEventCluster]:
+    """
+    Merge events that have overlapping or very close time ranges.
+    
+    This handles cases where multiple candidate clusters get refined to
+    essentially the same event (same plateaus).
+    
+    Args:
+        clusters: List of event clusters
+        overlap_threshold_min: Minimum time gap (minutes) to consider events as separate
+    
+    Returns:
+        List of merged events
+    """
+    if not clusters:
+        return []
+    
+    # Sort by start time
+    sorted_clusters = sorted(clusters, key=lambda x: x.start_datetime)
+    
+    merged = []
+    current = sorted_clusters[0]
+    
+    for i in range(1, len(sorted_clusters)):
+        next_cluster = sorted_clusters[i]
+        
+        # Check if events overlap or are very close
+        # Events overlap if: next starts before current ends
+        # Events are close if: gap between them is less than threshold
+        gap_minutes = (next_cluster.start_datetime - current.end_datetime).total_seconds() / 60
+        
+        # Check if same event type and overlapping/close
+        same_type = current.event_type == next_cluster.event_type
+        overlapping = next_cluster.start_datetime <= current.end_datetime
+        close_enough = gap_minutes <= overlap_threshold_min
+        
+        if same_type and (overlapping or close_enough):
+            # Merge: keep the one with higher volume or combine
+            # Use the earliest start and latest end
+            current.start_datetime = min(current.start_datetime, next_cluster.start_datetime)
+            current.end_datetime = max(current.end_datetime, next_cluster.end_datetime)
+            current.start_idx = min(current.start_idx, next_cluster.start_idx)
+            current.end_idx = max(current.end_idx, next_cluster.end_idx)
+            
+            # Use plateau levels from the event with larger volume change
+            if next_cluster.volume_change_l > current.volume_change_l:
+                current.start_level_l = next_cluster.start_level_l
+                current.end_level_l = next_cluster.end_level_l
+                current.volume_change_l = next_cluster.volume_change_l
+                current.signed_volume_l = next_cluster.signed_volume_l
+            
+            # Update other fields
+            current.samples_in_event = current.end_idx - current.start_idx + 1
+            current.confidence = max(current.confidence, next_cluster.confidence)
+            
+            # Merge candidate points
+            current.candidate_points = current.candidate_points + next_cluster.candidate_points
+            
+            # Update coordinates if needed
+            if current.start_lat is None and next_cluster.start_lat is not None:
+                current.start_lat = next_cluster.start_lat
+                current.start_lng = next_cluster.start_lng
+            if current.end_lat is None and next_cluster.end_lat is not None:
+                current.end_lat = next_cluster.end_lat
+                current.end_lng = next_cluster.end_lng
+        else:
+            # Events are different, save current and move to next
+            merged.append(current)
+            current = next_cluster
+    
+    # Don't forget the last cluster
+    merged.append(current)
+    
+    return merged
+
+
 def detect_fuel_events(
     df: pd.DataFrame,
     config: dict,
@@ -563,6 +642,13 @@ def detect_fuel_events(
         time_column=time_column,
         plateau_window_min=plateau_window,
         stability_threshold_l=stability_threshold
+    )
+    
+    # Step 3.5: Merge overlapping events (after refinement, events may overlap)
+    overlap_threshold = cluster_cfg.get("overlap_threshold_min", 5.0)
+    clusters = merge_overlapping_events(
+        clusters=clusters,
+        overlap_threshold_min=overlap_threshold
     )
     
     # Step 4: Validate with context

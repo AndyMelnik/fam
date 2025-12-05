@@ -109,14 +109,15 @@ class DatabaseConnector:
             for _, row in df.iterrows()
         ]
 
-    def get_objects_with_sensors_details(self, check_data_availability: bool = True) -> pd.DataFrame:
+    def get_objects_with_sensors_details(self, check_data_availability: bool = True, filter_with_data_only: bool = True) -> pd.DataFrame:
         """
         Get detailed table of objects with their fuel sensor configurations.
         Returns DataFrame with: object_id, object_label, device_id, sensor_label, 
-        input_label, sensor_type, sensor_units, calibration_data, has_data (if check_data_availability=True)
+        input_label, sensor_type, sensor_units, units_type_desc, calibration_data, has_data (if check_data_availability=True)
         
         Args:
-            check_data_availability: If True, checks if sensor has data in inputs table (last 7 days)
+            check_data_availability: If True, checks if sensor has data in inputs table (last 2 days)
+            filter_with_data_only: If True, only returns objects that have data in last 2 days
         """
         query = """
         SELECT 
@@ -127,11 +128,15 @@ class DatabaseConnector:
             sd.input_label,
             sd.sensor_type,
             COALESCE(sd.sensor_units, 'L') as sensor_units,
+            dp.description as units_type_desc,
             sd.calibration_data
         FROM raw_business_data.objects o
         INNER JOIN raw_business_data.sensor_description sd
             ON sd.device_id = o.device_id
             AND LOWER(sd.sensor_type) = 'fuel'
+        LEFT JOIN raw_business_data.description_parametrs dp
+            ON dp.type = 'sensor_description_units_type'
+            AND dp.key = sd.units_type
         ORDER BY o.object_label, sd.sensor_label
         """
         
@@ -157,11 +162,11 @@ class DatabaseConnector:
         
         # Check data availability in inputs table
         if check_data_availability and not df.empty:
-            # Check last 7 days
+            # Check last 2 days
             check_query = """
             SELECT DISTINCT device_id, sensor_name 
             FROM raw_telematics_data.inputs
-            WHERE device_time >= NOW() - INTERVAL '7 days'
+            WHERE device_time >= NOW() - INTERVAL '2 days'
             """
             with self.engine.connect() as conn:
                 available_df = pd.read_sql(text(check_query), conn)
@@ -188,6 +193,10 @@ class DatabaseConnector:
                 return "❌ No"
             
             df["has_data"] = df.apply(check_has_data, axis=1)
+            
+            # Filter to only show objects with data
+            if filter_with_data_only:
+                df = df[~df["has_data"].str.startswith("❌")].reset_index(drop=True)
         
         return df
 

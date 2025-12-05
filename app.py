@@ -347,12 +347,16 @@ def render_objects_table():
     
     df = st.session_state.objects_details_df.copy()
     
-    # Rename columns for display (9 columns: object_id, object_label, device_id, sensor_label, input_label, sensor_type, sensor_units, calibration_data, has_data)
+    # Rename columns for display
+    # Expected columns: object_id, object_label, device_id, sensor_label, input_label, sensor_type, sensor_units, units_type_desc, calibration_data, [has_data]
     num_cols = len(df.columns)
-    if num_cols == 9:
-        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Calibration", "Has Data"]
+    if num_cols == 10:
+        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Units Type", "Calibration", "Has Data"]
+    elif num_cols == 9:
+        # Without has_data
+        df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Units Type", "Calibration"]
     elif num_cols == 8:
-        # Could be with or without has_data
+        # Legacy format without units_type_desc
         if "has_data" in df.columns:
             df.columns = ["Object ID", "Object Label", "Device ID", "Sensor Label", "Input Label", "Sensor Type", "Units", "Has Data"]
         else:
@@ -369,11 +373,12 @@ def render_objects_table():
             "Object ID": st.column_config.NumberColumn("Object ID", width="small"),
             "Device ID": st.column_config.NumberColumn("Device ID", width="small"),
             "Units": st.column_config.TextColumn("Units", width="small"),
+            "Units Type": st.column_config.TextColumn("Units Type", width="medium"),
             "Calibration": st.column_config.TextColumn("Calibration", width="medium"),
-            "Has Data": st.column_config.TextColumn("Has Data (7d)", width="small"),
+            "Has Data": st.column_config.TextColumn("Has Data (2d)", width="small"),
         }
     )
-    st.caption(f"Total: {len(df)} sensor configurations across {df['Object ID'].nunique()} objects")
+    st.caption(f"Total: {len(df)} sensor configurations across {df['Object ID'].nunique()} objects (showing only with data in last 2 days)")
 
 
 def render_config_panel():
